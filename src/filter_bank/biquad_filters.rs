@@ -1,0 +1,253 @@
+mod utils;
+use crate::filter_bank::{LANES, NR_OF_BANDS};
+use std::simd::{Simd, StdFloat};
+use utils::get_biquad_coefficients;
+
+pub struct BiquadFilters {
+    b0_re: Vec<f32>,
+    b0_im: Vec<f32>,
+    b1_re: Vec<f32>,
+    b1_im: Vec<f32>,
+    b2_re: Vec<f32>,
+    b2_im: Vec<f32>,
+    a1_re: Vec<f32>,
+    a1_im: Vec<f32>,
+    a2_re: Vec<f32>,
+    a2_im: Vec<f32>,
+    z1_re: Vec<f32>,
+    z1_im: Vec<f32>,
+    z2_re: Vec<f32>,
+    z2_im: Vec<f32>,
+}
+
+impl BiquadFilters {
+    /// Creates a new set of biquad filters with the given frequencies and bandwidths.
+    pub fn new(
+        sample_rate: f32,
+        frequencies: [f32; NR_OF_BANDS],
+        bandwidths: [f32; NR_OF_BANDS],
+    ) -> Self {
+        let mut b0_re = vec![0.; NR_OF_BANDS];
+        let mut b0_im = vec![0.; NR_OF_BANDS];
+        let mut b1_re = vec![0.; NR_OF_BANDS];
+        let mut b1_im = vec![0.; NR_OF_BANDS];
+        let mut b2_re = vec![0.; NR_OF_BANDS];
+        let mut b2_im = vec![0.; NR_OF_BANDS];
+        let mut a1_re = vec![0.; NR_OF_BANDS];
+        let mut a1_im = vec![0.; NR_OF_BANDS];
+        let mut a2_re = vec![0.; NR_OF_BANDS];
+        let mut a2_im = vec![0.; NR_OF_BANDS];
+
+        for (i, (freq, bandwidth)) in frequencies.iter().zip(bandwidths).enumerate() {
+            let (b, a) = get_biquad_coefficients(*freq, sample_rate, bandwidth);
+
+            b0_re[i] = b[0].re;
+            b0_im[i] = b[0].im;
+            b1_re[i] = b[1].re;
+            b1_im[i] = b[1].im;
+            b2_re[i] = b[2].re;
+            b2_im[i] = b[2].im;
+            a1_re[i] = a[1].re;
+            a1_im[i] = a[1].im;
+            a2_re[i] = a[2].re;
+            a2_im[i] = a[2].im;
+        }
+
+        Self {
+            b0_re,
+            b0_im,
+            b1_re,
+            b1_im,
+            b2_re,
+            b2_im,
+            a1_re,
+            a1_im,
+            a2_re,
+            a2_im,
+            z1_re: vec![0.; NR_OF_BANDS],
+            z1_im: vec![0.; NR_OF_BANDS],
+            z2_re: vec![0.; NR_OF_BANDS],
+            z2_im: vec![0.; NR_OF_BANDS],
+        }
+    }
+
+    /// Resets the filter state
+    pub fn reset(&mut self) {
+        self.z1_re.fill(0.);
+        self.z1_im.fill(0.);
+        self.z2_re.fill(0.);
+        self.z2_im.fill(0.);
+    }
+
+    /// Processes a SIMD vector of input samples returning a SIMD vector of complex numbers with the real and imaginary parts. `i` specifies the index / frequency band offset.
+    #[inline(always)]
+    pub fn process_simd(
+        &mut self,
+        input: Simd<f32, LANES>,
+        i: usize,
+    ) -> (Simd<f32, LANES>, Simd<f32, LANES>) {
+        // Biquad coefficients
+        let b0_re = Simd::from_slice(&self.b0_re[i..]);
+        let b0_im = Simd::from_slice(&self.b0_im[i..]);
+        let b1_re = Simd::from_slice(&self.b1_re[i..]);
+        let b1_im = Simd::from_slice(&self.b1_im[i..]);
+        let b2_re = Simd::from_slice(&self.b2_re[i..]);
+        let b2_im = Simd::from_slice(&self.b2_im[i..]);
+
+        let a1_re = Simd::from_slice(&self.a1_re[i..]);
+        let a1_im = Simd::from_slice(&self.a1_im[i..]);
+        let a2_re = Simd::from_slice(&self.a2_re[i..]);
+        let a2_im = Simd::from_slice(&self.a2_im[i..]);
+
+        // Recursion state
+        let z1_re = Simd::from_slice(&self.z1_re[i..]);
+        let z1_im = Simd::from_slice(&self.z1_im[i..]);
+        let z2_re = Simd::from_slice(&self.z2_re[i..]);
+        let z2_im = Simd::from_slice(&self.z2_im[i..]);
+
+        let y_re = b0_re.mul_add(input, z1_re);
+        let y_im = b0_im.mul_add(input, z1_im);
+
+        (b1_re.mul_add(input, z2_re) - a1_re * y_re + a1_im * y_im)
+            .copy_to_slice(&mut self.z1_re[i..]);
+        (b1_im.mul_add(input, z2_im) - a1_re * y_im - a1_im * y_re)
+            .copy_to_slice(&mut self.z1_im[i..]);
+
+        (b2_re * input - a2_re * y_re + a2_im * y_im).copy_to_slice(&mut self.z2_re[i..]);
+        (b2_im * input - a2_re * y_im - a2_im * y_re).copy_to_slice(&mut self.z2_im[i..]);
+
+        (y_re, y_im)
+    }
+
+    /// Processes a single input sample returning a complex number with the real and imaginary parts. `i` specifies the index / frequency band offset.
+    #[inline(always)]
+    pub fn process_scalar(&mut self, input: f32, i: usize) -> (f32, f32) {
+        let y_re = self.b0_re[i].mul_add(input, self.z1_re[i]);
+        let y_im = self.b0_im[i].mul_add(input, self.z1_im[i]);
+
+        self.z1_re[i] = self.b1_re[i].mul_add(input, self.z2_re[i]) - self.a1_re[i] * y_re
+            + self.a1_im[i] * y_im;
+        self.z1_im[i] = self.b1_im[i].mul_add(input, self.z2_im[i])
+            - self.a1_re[i] * y_im
+            - self.a1_im[i] * y_re;
+
+        self.z2_re[i] = self.b2_re[i] * input - self.a2_re[i] * y_re + self.a2_im[i] * y_im;
+        self.z2_im[i] = self.b2_im[i] * input - self.a2_re[i] * y_im - self.a2_im[i] * y_re;
+
+        (y_re, y_im)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::assert_approximately_eq;
+
+    /// Compare the coefficients generated by this Rust implementation with those generated by the Python/scipy filter design found in the sketches folder.
+    #[test]
+    fn should_create_biquad_coefficients_for_200_hz() {
+        let freq = 200.;
+        let q = 100.;
+        let bandwidth = freq / q;
+        let filter = BiquadFilters::new(48000., [freq; NR_OF_BANDS], [bandwidth; NR_OF_BANDS]);
+        assert_approximately_eq!(filter.b0_re[0], 1.9100775e-5, 5);
+        assert_approximately_eq!(filter.b0_im[0], 0., 5);
+        assert_approximately_eq!(filter.b1_re[0], 0., 5);
+        assert_approximately_eq!(filter.b1_im[0], 0., 5);
+        assert_approximately_eq!(filter.b2_re[0], -1.9100775e-5, 5);
+        assert_approximately_eq!(filter.b2_im[0], 0., 5);
+        assert_approximately_eq!(filter.a1_re[0], -1.99731534, 5);
+        assert_approximately_eq!(filter.a1_im[0], -0.05230154, 5);
+        assert_approximately_eq!(filter.a2_re[0], 0.99663327, 5);
+        assert_approximately_eq!(filter.a2_im[0], 0.05223134, 5);
+    }
+
+    /// Compare the coefficients generated by this Rust implementation with those generated by the Python/scipy filter design found in the sketches folder.
+    #[test]
+    fn should_create_biquad_coefficients_for_1000_hz() {
+        let freq = 1000.;
+        let q = 100.;
+        let bandwidth = freq / q;
+        let filter = BiquadFilters::new(48000., [freq; NR_OF_BANDS], [bandwidth; NR_OF_BANDS]);
+        assert_approximately_eq!(filter.b0_re[0], 6.55512789e-6, 5);
+        assert_approximately_eq!(filter.b0_im[0], 0.0, 5);
+        assert_approximately_eq!(filter.b1_re[0], 0.0, 5);
+        assert_approximately_eq!(filter.b1_im[0], 0.0, 5);
+        assert_approximately_eq!(filter.b2_re[0], -6.55512789e-6, 5);
+        assert_approximately_eq!(filter.b2_im[0], 0.0, 5);
+        assert_approximately_eq!(filter.a1_re[0], -1.98029582, 5);
+        assert_approximately_eq!(filter.a1_im[0], -0.26071089, 5);
+        assert_approximately_eq!(filter.a2_re[0], 0.96340035, 5);
+        assert_approximately_eq!(filter.a2_im[0], 0.25814234, 5);
+    }
+
+    /// Compare the filter output generated by this Rust implementation with that generated by the Python/scipy filter design found in the sketches folder.
+    #[test]
+    fn should_give_the_same_output_as_python() {
+        let freq = 1000.;
+        let q = 100.;
+        let bandwidth = freq / q;
+        let mut filter = BiquadFilters::new(48000., [freq; NR_OF_BANDS], [bandwidth; NR_OF_BANDS]);
+        let input: [f32; 16] = [
+            0.00801938,
+            -0.10601604,
+            -0.3852411,
+            0.53385051,
+            2.59663544,
+            -0.06834187,
+            0.72588647,
+            1.40304547,
+            -0.91761868,
+            -0.74447011,
+            -0.48667523,
+            -0.54130837,
+            0.24084831,
+            0.32466236,
+            -0.2323196,
+            -1.14806982,
+        ];
+        let expected_output_re = [
+            5.22700559e-08,
+            -5.87498195e-07,
+            -3.78059369e-06,
+            -2.71016950e-06,
+            1.79679543e-05,
+            3.44527188e-05,
+            3.75072455e-05,
+            4.83461086e-05,
+            4.63444395e-05,
+            2.78643659e-05,
+            1.00445845e-05,
+            -7.81802186e-06,
+            -2.15970392e-05,
+            -2.97936910e-05,
+            -4.07934834e-05,
+            -6.08869361e-05,
+        ];
+        let expected_output_im = [
+            0.00000000e+00,
+            1.36267540e-08,
+            -1.39667658e-07,
+            -1.12365793e-06,
+            -1.82127511e-06,
+            2.85967382e-06,
+            1.17613530e-05,
+            2.14207849e-05,
+            3.40106417e-05,
+            4.63167065e-05,
+            5.42562187e-05,
+            5.82477717e-05,
+            5.84463389e-05,
+            5.60127871e-05,
+            5.24222539e-05,
+            4.69045949e-05,
+        ];
+        for ((x, expected_re), expected_im) in
+            input.iter().zip(expected_output_re).zip(expected_output_im)
+        {
+            let (actual_re, actual_im) = filter.process_scalar(*x, 0);
+            assert_approximately_eq!(actual_re, expected_re, 5);
+            assert_approximately_eq!(actual_im, expected_im, 5);
+        }
+    }
+}
