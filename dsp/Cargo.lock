@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "poly-pitch-filters"
+name = "poly_pitch_dsp"
 version = "0.1.0"
 dependencies = [
  "num-complex",

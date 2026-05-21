@@ -1,0 +1,22 @@
+[package]
+name = "benches"
+version = "0.1.0"
+edition = "2024"
+
+[profile.dev]
+debug = true
+
+[profile.release]
+debug = true
+
+[dependencies]
+fastrand = "2.4.1"
+poly_pitch_dsp = { path = "../dsp" }
+
+[dev-dependencies]
+criterion = { version = "0.4", features = ["html_reports"] }
+flamegraph = "0.6.11"
+
+[[bench]]
+name = "filter_bank_bench"
+harness = false

@@ -1,6 +1,7 @@
 mod biquad_filters;
 mod utils;
 use crate::filter_bank::utils::{get_bandwidth, get_target_frequency};
+use std::{hint::black_box, simd::StdFloat};
 use {biquad_filters::BiquadFilters, std::array, std::simd::Simd};
 
 const Z_LEFT: f32 = 1.5;
@@ -34,22 +35,32 @@ impl FilterBank {
 
     // Process in chunks of LANES for SIMD optimization
     while i + LANES <= NR_OF_BANDS {
-      let (_re, _im) = self.filters.process_simd(simd_input, i);
+      let (re, im) = self.filters.process_simd(simd_input, i);
 
       /*
-      NOTE: The plugin normally processes the filter output here
+      NOTE: The plugin normally processes the filter output here.
+      For demonstration purposes, let's apply some heavy processing to simulate the workload.
+      Using black_box to prevent the compiler from removing this redundant computation.
       */
+      for _ in 0..32 {
+        black_box((re * re + im * im).sqrt());
+      }
 
       i += LANES;
     }
 
     // Handle remaining bands that don't fit into a full SIMD vector
     while i < NR_OF_BANDS {
-      let (_re, _im) = self.filters.process_scalar(input, i);
+      let (re, im) = self.filters.process_scalar(input, i);
 
       /*
       NOTE: The plugin normally processes the filter output here
+      For demonstration purposes, let's apply some heavy processing to simulate the workload.
+      Using black_box to prevent the compiler from removing this redundant computation.
       */
+      for _ in 0..32 {
+        black_box((re * re + im * im).sqrt());
+      }
 
       i += 1;
     }
