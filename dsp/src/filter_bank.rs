@@ -54,7 +54,7 @@ impl FilterBank {
       let (re, im) = self.filters.process_scalar(input, i);
 
       /*
-      NOTE: The plugin normally processes the filter output here
+      NOTE: The plugin normally processes the filter output here.
       For demonstration purposes, let's apply some heavy processing to simulate the workload.
       Using black_box to prevent the compiler from removing this redundant computation.
       */
