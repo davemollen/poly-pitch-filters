@@ -1,0 +1,192 @@
+name: Build and release
+
+on:
+  release:
+    types: [created]
+
+defaults:
+  run:
+    # This otherwise gets run under dash which does not support brace expansion
+    shell: bash
+
+env:
+  binary_name: dm_poly_pitch
+  plugin_name: dm-PolyPitch
+  mod_package_name: dm-polypitch
+
+jobs:
+  package-plugin:
+    name: Package plugins
+    strategy:
+      matrix:
+        include:
+          - { name: ubuntu, os: ubuntu-latest, cross-target: "" }
+          - { name: macos, os: macos-latest, cross-target: x86_64-apple-darwin }
+          - { name: windows, os: windows-latest, cross-target: "" }
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch all git history
+        run: git fetch --force --prune --tags --unshallow
+
+      - name: Install dependencies
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libgl-dev libjack-dev libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig1-dev
+
+      - uses: actions/cache@v4
+        # FIXME: Caching `target/` causes the Windows runner to blow up after some time
+        if: startsWith(matrix.os, 'windows')
+        with:
+          path: |
+            ~/nih-plug/.cargo/registry/index/
+            ~/nih-plug/.cargo/registry/cache/
+            ~/nih-plug/.cargo/git/db/
+          key: ${{ matrix.name }}-${{ matrix.cross-target }}
+
+      - uses: actions/cache@v4
+        if: startsWith(matrix.os, 'windows') != true
+        with:
+          path: |
+            ~/nih-plug/.cargo/registry/index/
+            ~/nih-plug/.cargo/registry/cache/
+            ~/nih-plug/.cargo/git/db/
+            target/
+          key: ${{ matrix.name }}-${{ matrix.cross-target }}
+
+      - name: Set up Rust toolchain
+        # Needed for SIMD
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          # The macOS x86_64 build is done from an AArch64 macOS CI runner, so
+          # it needs to be cross compiled
+          targets: ${{ matrix.cross-target }}
+
+      - name: Build VST3 and CLAP plugin
+        working-directory: ./nih-plug
+        run: |
+          runner_name=${{ matrix.name }}
+          if [[ $runner_name = 'macos' ]]; then
+            export MACOSX_DEPLOYMENT_TARGET=10.13
+            cargo xtask bundle-universal $binary_name --release
+          else
+            cross_target=${{ matrix.cross-target }}
+            if [[ -n $cross_target ]]; then
+              cargo xtask bundle $binary_name --release --target $cross_target
+            else
+              cargo xtask bundle $binary_name --release
+            fi
+          fi
+
+      - name: Determine build archive name
+        run: |
+          echo "ARCHIVE_NAME=$plugin_name-${{ matrix.name }}" >> "$GITHUB_ENV"
+
+      - name: Move VST3 & CLAP plugin into build archive
+        run: |
+          mkdir -p $ARCHIVE_NAME
+          mv ./nih-plug/target/bundled/$binary_name.clap $ARCHIVE_NAME
+          mv ./nih-plug/target/bundled/$binary_name.vst3 $ARCHIVE_NAME
+
+      - name: Rename plugins
+        run: |
+          for file_name in $ARCHIVE_NAME/$binary_name.*;
+            do mv $file_name "${file_name/$binary_name/$plugin_name}";
+          done
+
+      - name: Rename vst3 plugin binary on linux
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          mv $ARCHIVE_NAME/$plugin_name.vst3/Contents/x86_64-linux/$binary_name.so $ARCHIVE_NAME/$plugin_name.vst3/Contents/x86_64-linux/$plugin_name.so
+
+      - name: Build AUv2 plugin from CLAP plugin
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          git clone https://github.com/free-audio/clap-wrapper.git
+          cp .github/workflows/AUv2/top_level_default.cmake clap-wrapper/cmake/top_level_default.cmake
+          version=$(perl -pe 's/[^0-9.]//g' <<< ${{ github.event.release.tag_name }})
+          cmake -S ./clap-wrapper -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCLAP_WRAPPER_DOWNLOAD_DEPENDENCIES=TRUE \
+            -DCLAP_WRAPPER_OUTPUT_NAME="$plugin_name" \
+            -DCLAP_WRAPPER_BUNDLE_VERSION="$version" \
+            -DCLAP_WRAPPER_CLAP_LOCATION="${{ github.workspace }}/$ARCHIVE_NAME/$plugin_name.clap"
+          cmake --build ./build --config Release
+          mv build/$plugin_name.component $ARCHIVE_NAME
+
+      - name: Add an OS-specific readme file with installation instructions
+        run: cp ".github/workflows/readme-${{ runner.os }}.txt" "$ARCHIVE_NAME/README.txt"
+
+      - name: Add manual pdf
+        run: cp ".github/workflows/manual.pdf" "$ARCHIVE_NAME/manual.pdf"
+
+      - name: Zip files
+        if: startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          $archiveName = "$env:ARCHIVE_NAME"
+          Compress-Archive -Path $archiveName -DestinationPath "$archiveName.zip"
+
+      - name: Zip files
+        if: startsWith(matrix.os, 'windows') != true
+        run: zip -r $ARCHIVE_NAME.zip $ARCHIVE_NAME
+
+      - name: Add zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{github.ref_name}}
+          files: ${{ env.ARCHIVE_NAME }}.zip
+
+  package-mod-plugin:
+    name: Package mod plugins
+    strategy:
+      matrix:
+        platform: [modduox-new, moddwarf-new, darkglass-anagram]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Docker image from GHCR
+        run: docker pull ghcr.io/davemollen/${{ matrix.platform }}-plugin-builder:latest
+
+      - name: Run Docker container
+        run: |
+          docker run -t -d --name mpb \
+            -v "$(pwd)":/root/source \
+            ghcr.io/davemollen/${{ matrix.platform }}-plugin-builder:latest
+
+      - name: Add local build script to Docker container
+        run: |
+          docker exec -w /root/mod-plugin-builder/plugins/package mpb mkdir -p $mod_package_name
+          docker cp .github/workflows/$mod_package_name.mk mpb:/root/mod-plugin-builder/plugins/package/$mod_package_name
+
+      - name: Build for modaudio
+        run: docker exec mpb ./build ${{ matrix.platform }} $mod_package_name
+
+      - name: Determine build archive name
+        run: echo "ARCHIVE_NAME=$plugin_name-${{ matrix.platform }}" >> "$GITHUB_ENV"
+
+      - name: Zip files
+        run: |
+          mkdir -p $ARCHIVE_NAME
+          docker cp mpb:/root/mod-workdir/${{ matrix.platform }}/plugins/$plugin_name.lv2 $ARCHIVE_NAME
+          cp .github/workflows/readme-Mod.txt "$ARCHIVE_NAME/README.txt"
+          cp .github/workflows/manual.pdf "$ARCHIVE_NAME/manual.pdf"
+          zip -r $ARCHIVE_NAME.zip $ARCHIVE_NAME
+
+      - name: Add zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{github.ref_name}}
+          files: ${{ env.ARCHIVE_NAME }}.zip
